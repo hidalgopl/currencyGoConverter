@@ -1,4 +1,4 @@
-package currencyGoConverter
+package main
 
 import (
 	"net/http"

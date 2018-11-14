@@ -1,10 +1,11 @@
-package currencyGoConverter
+package main
 
 import (
 	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -15,16 +16,6 @@ const (
 type ConvertHandler struct {
 }
 
-func main() {
-	http.Handle("/convert-all", &ConvertHandler{})
-	log.Fatal(http.ListenAndServe(":8080", nil))
-
-}
-
-/// Server with endpoint /convert-all/?base=PLN&amount=2.34 that returns:
-// {"base": "PLN", "amount": 2.34, "results": {"USD": 0.56, ...}}
-// converting: call to external API to get actual rates returns {"currency": amount} struct to channel.
-// endpoint response is read from channel
 type JsonCurrencyAmount struct {
 	Currency string  `json:"currency"`
 	Amount   float64 `json:"amount"`
@@ -48,29 +39,56 @@ func ProcessResponse(resp *http.Response) ResponseStruct {
 	return dr
 }
 
-func GetExchangeRate(baseCurrency string, resultCurrency string) float64 {
-	url := baseUrl + baseCurrency
-	response, err := http.Get(url)
+func GetExchangeRate(baseCurrency string, resultCurrency string, amount float64, resultChannel chan JsonCurrencyAmount) float64 {
+	exchangeUrl := baseUrl + baseCurrency
+	response, err := http.Get(exchangeUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
 	dr := ProcessResponse(response)
 	result := dr.Rates[resultCurrency]
-	return result
+	defer response.Body.Close()
+	resultChannel <- convertCurrency(resultCurrency, amount, result)
+	return 0
+}
+
+func (h *ConvertHandler) HandleQueryParams(qParams url.Values) (string, float64, string) {
+	baseCurrency := qParams.Get("base")
+	if baseCurrency == "" {
+		log.Fatal("No base param")
+	}
+	amount, err := strconv.ParseFloat(qParams.Get("amount"), 64)
+	if err != nil {
+		log.Fatal(err)
+	}
+	resultCurrency := qParams.Get("result")
+	if resultCurrency == "" {
+		log.Fatal("No result param")
+	}
+	return baseCurrency, amount, resultCurrency
 }
 
 func (h *ConvertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	var data bytes.Buffer
 	_, err := data.ReadFrom(r.Body)
 	if err != nil {
 		panic(err)
 	}
 	queryParams := r.URL.Query()
-	baseCurrency := queryParams.Get("base")
-	amount, _ := strconv.ParseFloat(queryParams.Get("amount"), 64)
-	resultCurrency := queryParams.Get("result")
-	exchangeRate := GetExchangeRate(baseCurrency, resultCurrency)
-	result := convertCurrency(resultCurrency, amount, exchangeRate)
-	json.NewEncoder(w).Encode(result)
+	baseCurrency, amount, resultCurrency := h.HandleQueryParams(queryParams)
+	resultChannel := make(chan JsonCurrencyAmount)
+	go GetExchangeRate(baseCurrency, resultCurrency, amount, resultChannel)
+	json.NewEncoder(w).Encode(<-resultChannel)
+
+}
+
+func main() {
+	/// Server with endpoint /convert-all/?base=PLN&amount=2.34 that returns:
+	// {"base": "PLN", "amount": 2.34, "results": {"USD": 0.56, ...}}
+	// converting: call to external API to get actual rates returns {"currency": amount} struct to channel.
+	// endpoint response is read from channel
+	http.Handle("/convert-all", &ConvertHandler{})
+	log.Fatal(http.ListenAndServe(":8080", nil))
 
 }
